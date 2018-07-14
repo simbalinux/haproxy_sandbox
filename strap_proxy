@@ -1,0 +1,66 @@
+#!/usr/bin/bash
+set -x 
+#enable ssh 
+sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+#disable selinux
+sed -i 's/enforcing/disabled/g' /etc/selinux/config /etc/selinux/config
+
+if [ ! $(command -v haproxy) ]; then 
+# change these IPS if you are using this in a different environment
+grep -q -F '192.168.49.10    web1.example.com        web1' /etc/hosts || echo '192.168.49.10    web1.example.com        web1' >> /etc/hosts
+grep -q -F '192.168.49.11    web2.example.com        web2' /etc/hosts || echo '192.168.49.11    web2.example.com        web2' >> /etc/hosts
+yum -y install epel-release
+yum -y install haproxy openssl-devel
+
+#cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak
+#
+sed -i 's/#$ModLoad imudp/$ModLoad imudp/' /etc/rsyslog.conf
+#
+sed -i 's/#$UDPServerRun 514/$UDPServerRun 514/' /etc/rsyslog.conf
+#
+#echo 'local2.*      /var/log/haproxy.log' > /etc/rsyslog.d/haproxy.conf
+
+echo '
+local2.=info     /var/log/haproxy-access.log    #For Access Log
+local2.notice    /var/log/haproxy-info.log      #For Service Info - Backend, loadbalancer' > /etc/rsyslog.d/haproxy.conf
+systemctl restart rsyslog
+systemctl enable haproxy
+systemctl restart haproxy
+
+echo '
+#---------------------------------------------------------------------
+# FrontEnd Configuration
+#---------------------------------------------------------------------
+frontend http
+    bind *:80
+    option http-server-close
+    option forwardfor
+    default_backend backend
+
+frontend https
+    bind *:443 ssl crt /etc/haproxy/haproxy.pem
+    mode http
+    option http-server-close
+    option forwardfor
+    reqadd X-Forwarded-Proto:\ https
+    reqadd X-Forwarded-Port:\ 443
+    # set HTTP Strict Transport Security (HTST) header
+    rspadd  Strict-Transport-Security:\ max-age=15768000
+    default_backend             backend_ssl
+#---------------------------------------------------------------------
+# BackEnd roundrobin as balance algorithm
+#---------------------------------------------------------------------
+backend backend
+    balance roundrobin                                    #Balance algorithm
+    option httpchk HEAD / HTTP/1.1\r\nHost:\ localhost    #Check the server application is up and healty - 200 status code
+    server web1 web1.example.com:80 check                 #apache 
+    server web2 web2.example.com:80 check                 #apache
+backend backend_ssl
+    server web1 web1.example.com:443 ssl verify none
+    server web1 web2.example.com:443 ssl verify none' >> /etc/haproxy/haproxy.cfg
+fi
+
+
+#for import of the ssl certs into haproxy "if" the ssl certs originated first in apache.
+
+#/etc/ssl/private/apache-selfsigned.key > /etc/ssl/private/haproxy.pem; /etc/ssl/certs/apache-selfsigned.crt >> /etc/ssl/private/haproxy.pem; cat /etc/ssl/certs/dhparam.pem >> /etc/ssl/private/haproxy.pem

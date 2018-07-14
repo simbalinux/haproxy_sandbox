@@ -1,0 +1,165 @@
+#!/usr/bin/bash
+set -x 
+#enable ssh 
+sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+#disable selinux
+sed -i 's/enforcing/disabled/g' /etc/selinux/config /etc/selinux/config
+# check hostname
+hostname -f 
+grep -q -F '192.168.49.12    load.example.com        load' /etc/hosts || echo '192.168.49.12    load.example.com        load' >> /etc/hosts
+
+# update and install Apache
+yum -y update
+yum -y install vim httpd  
+systemctl restart httpd 
+# backup of the httpd.conf file 
+cp /etc/httpd/conf/httpd.conf /etc/httpd/conf/httpd.conf.bak
+
+
+# Create an apache vhost for testing
+
+# create required directories and enable apache 
+mkdir -p /var/log/httpd/example.com/logs
+mkdir -p /var/www/html/example.com/public_html
+chown -R apache:apache /var/www/html/example.com
+# Additional domains can be added to the vhost.conf file as needed.
+echo ' 
+NameVirtualHost *:80
+
+<VirtualHost *:80>
+    ServerAdmin webmaster@example.com
+    ServerName web2.example.com
+    ServerAlias web2.example.com
+#    Redirect "/" "https://web2.example.com/"
+    DocumentRoot /var/www/html/example.com/public_html/
+    ErrorLog /var/log/httpd/example.com/logs/error.log
+    CustomLog /var/log/httpd/example.com/logs/access.log combined
+</VirtualHost>
+' > /etc/httpd/conf.d/example.conf
+sleep 5
+systemctl enable httpd
+systemctl restart httpd 
+sleep 5
+# MariaDB install and configruation with test DB "webdata" and "webuser"
+yum -y install mariadb-server
+systemctl enable mariadb.service
+systemctl restart mariadb.service
+
+
+#secure installation use expect script to create automation
+
+secure_mysql=$(expect -c "
+
+set timeout 10
+spawn mysql_secure_installation
+
+expect \"Enter current password for root (enter for none):\"
+send \"$MYSQL\r\"
+
+expect \"Change the root password?\"
+send \"n\r\"
+
+expect \"Remove anonymous users?\"
+send \"y\r\"
+
+expect \"Disallow root login remotely?\"
+send \"y\r\"
+
+expect \"Remove test database and access to it?\"
+send \"y\r\"
+
+expect \"Reload privilege tables now?\"
+send \"y\r\"
+
+expect eof
+")
+
+#create statements for sql
+mysql -e "CREATE DATABASE webdata;"
+mysql -e "GRANT ALL PRIVILEGES ON webdata.* TO 'webuser'@'localhost' IDENTIFIED BY 'admin' WITH GRANT OPTION;"
+mysql -e "FLUSH PRIVILEGES;"
+
+# https://www.tecmint.com/install-php-7-in-centos-7/
+yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+yum -y install http://rpms.remirepo.net/enterprise/remi-release-7.rpm
+yum -y install yum-utils
+yum-config-manager --enable remi-php70
+yum -y install php php-pear php-mysql 
+
+# create the log directory for PHP and give the Apache user ownership:
+
+mkdir /var/log/php
+chown apache /var/log/php
+
+systemctl reload httpd
+
+
+yum -y install mod_ssl 
+
+cp -rf /etc/httpd/conf.d/ssl.conf /etc/httpd/conf.d/ssl.conf.bak
+
+sed -i 's/#DocumentRoot "\/var\/www\/html"/DocumentRoot "\/var\/www\/html\/example.com\/public_html"/' /etc/httpd/conf.d/ssl.conf
+sed -i 's/#ServerName www.example.com:443/ServerName web2.example.com:443/' /etc/httpd/conf.d/ssl.conf
+sed -i '/ServerName web2.example.com:443/a CustomLog /var/log/httpd/example.com/logs/web2.example.com-access.log combined' /etc/httpd/conf.d/ssl.conf
+
+mkdir /etc/ssl/private
+chmod 700 /etc/ssl/private
+
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/ssl/private/apache-selfsigned.key -out /etc/ssl/certs/apache-selfsigned.crt -subj "/C=US/ST=New York/L=Brooklyn/O=Example Brooklyn Company/CN=examplebrooklyn.com"
+
+openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048
+cat /etc/ssl/certs/dhparam.pem | sudo tee -a /etc/ssl/certs/apache-selfsigned.crt
+
+sed -i 's/SSLProtocol all -SSLv2 -SSLv3/#SSLProtocol all -SSLv2 -SSLv3/' /etc/httpd/conf.d/ssl.conf
+
+sed -i 's/SSLCipherSuite HIGH:3DES:!aNULL:!MD5:!SEED:!IDEA/#SSLCipherSuite HIGH:3DES:!aNULL:!MD5:!SEED:!IDEA/' /etc/httpd/conf.d/ssl.conf
+
+sed -i 's/SSLCertificateFile \/etc\/pki\/tls\/certs\/localhost.crt/SSLCertificateFile \/etc\/ssl\/certs\/apache-selfsigned.crt/' /etc/httpd/conf.d/ssl.conf
+
+sed -i 's/SSLCertificateKeyFile \/etc\/pki\/tls\/private\/localhost.key/SSLCertificateKeyFile \/etc\/ssl\/private\/apache-selfsigned.key/' /etc/httpd/conf.d/ssl.conf
+
+echo ' 
+# Begin copied text
+# from https://cipherli.st/
+# and https://raymii.org/s/tutorials/Strong_SSL_Security_On_Apache2.html
+
+SSLCipherSuite EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH
+SSLProtocol All -SSLv2 -SSLv3
+SSLHonorCipherOrder On
+# Disable preloading HSTS for now.  You can use the commented out header line that includes
+# the "preload" directive if you understand the implications.
+#Header always set Strict-Transport-Security "max-age=63072000; includeSubdomains; preload"
+Header always set Strict-Transport-Security "max-age=63072000; includeSubdomains"
+Header always set X-Frame-Options DENY
+Header always set X-Content-Type-Options nosniff
+# Requires Apache >= 2.4
+SSLCompression off 
+SSLUseStapling on 
+SSLStaplingCache "shmcb:logs/stapling-cache(150000)" 
+# Requires Apache >= 2.4.11
+# SSLSessionTickets Off' >> /etc/httpd/conf.d/ssl.conf
+
+
+apachectl configtest
+
+echo "
+<?php
+
+// Show all information, defaults to INFO_ALL
+phpinfo();
+
+?>" > /var/www/html/example.com/public_html/index.php
+
+echo "
+<html>
+<header><title>This is title</title></header>
+<body>
+ <font size="15">web2.example.com!</font> 
+</body>
+</html>" > /var/www/html/example.com/public_html/index.html
+systemctl restart httpd
+
+
+
+
+
