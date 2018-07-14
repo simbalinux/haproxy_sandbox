@@ -13,7 +13,7 @@ sudo cat /etc/ssl/private/apache-selfsigned.key > /tmp/haproxy.pem; sudo cat /et
 
 Remember hostbox is the machine that hosts vagrant aka host not the guest ip.
 
-#This will give you 2 web servers configured for ssl on the backedn as well as to haproxy.
+This will give you 2 web servers configured for ssl on the backedn as well as to haproxy.
 
 **Haproxy will send XFF's via the traffic relay to apache, by default apache is not formatted default to accept this data....herefore apache "LogFormat" will need to be changed. Haproxy passes the field name "X-Forwarded-For" needs to be exact.**
 
